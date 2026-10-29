@@ -1,3 +1,4 @@
+import {jobCards,initJobActions} from "./job-stages.js";
 import {collection,addDoc,updateDoc,doc,getDocs,query,orderBy,serverTimestamp} from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
 let db,role,user,companies=[],jobs=[],tab="clients",editing=null;
 const $=id=>document.getElementById(id);
@@ -14,7 +15,7 @@ function render(){
  const options=companies.filter(c=>c.isClient&&c.status==="active").map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("");
  let content;
  if(tab==="jobs"){
-  content=`<div class="j-row"><h3>Jobs</h3><button id="newJob">+ New Job</button></div>`+jobs.map(j=>card(`<div class="j-row"><strong>${esc(j.reference)}</strong><span class="j-sub">${esc(j.status||"In progress")}</span></div><p class="j-sub">${esc(j.clientName||"")} · ${esc(j.description||"")}</p><details><summary>Quotation</summary><p>${esc(j.quotationDate||"—")} · ${esc(j.description||"—")}</p></details>${["Client Purchase Order","Delivery Ticket","Return Ticket","Invoice"].map(t=>`<details><summary>${t}</summary><p class="j-sub">Not recorded yet</p></details>`).join("")}`)).join("");
+  content=`<div class="j-row"><h3>Jobs</h3><button id="newJob">+ New Job</button></div>`+jobCards(jobs,companies);
  }else{
   let rows=companies.filter(c=>c[tab==="clients"?"isClient":"isVendor"]&&c.status==="active");
   content=`<div class="j-row"><h3>${tab==="clients"?"Client":"Vendor"} Register</h3><div class="j-actions">${manager()?'<button id="newCompany">+ Add Company</button>':""}<button id="exportRegister">Export CSV</button></div></div><input id="companySearch" placeholder="Search companies" aria-label="Search companies">`+
@@ -23,7 +24,7 @@ function render(){
  root.innerHTML=buttons()+content+`<div id="jmsFormRegion"></div><p id="jmsNotice" class="j-note" role="status"></p>`;
  root.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{tab=b.dataset.tab;render();});
  if($("newCompany"))$("newCompany").onclick=()=>openCompany();
- if($("newJob"))$("newJob").onclick=()=>openJob(options);
+ if(tab==="jobs")initJobActions(root,{db,user,companies,jobs,reload,render});
  if($("exportRegister"))$("exportRegister").onclick=exportRegister;
  root.querySelectorAll("[data-edit]").forEach(b=>b.onclick=()=>openCompany(companies.find(c=>c.id===b.dataset.edit)));
  if($("companySearch"))$("companySearch").oninput=e=>{
