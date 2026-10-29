@@ -1,3 +1,4 @@
+import { startModules } from "./workspace.js";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
 import { getAuth, onAuthStateChanged, setPersistence, browserLocalPersistence, signInWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, signOut } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-auth.js";
 import { getFirestore, doc, getDoc } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
@@ -32,6 +33,7 @@ try{
       document.getElementById("roleLabel").textContent=labels[profile.role];
       document.getElementById("welcomeHeading").textContent="Welcome to JMS";
       document.getElementById("workspaceDescription").textContent=descriptions[profile.role];
+      await startModules(db,user,profile.role);
     }catch(err){
       await signOut(auth);
       showError("Unable to verify your JMS access. Please try again or contact your administrator.");
