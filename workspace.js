@@ -1,10 +1,11 @@
 import {jobCards,initJobActions} from "./job-stages.js";
 import {collection,addDoc,updateDoc,doc,getDocs,query,where,orderBy,limit,startAfter,serverTimestamp} from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
-let db,role,user,companies=[],jobs=[],tab="clients",editing=null;
+let db,role,user,companies=[],jobs=[],tab="overview",editing=null;
 const localNow=()=>new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Kuala_Lumpur",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
 const today=localNow();
 let jobYear=today.slice(0,4),jobMonth=today.slice(5,7),jobPeriod="month",jobCursor=null,jobHasMore=false;
 const PAGE_SIZE=30;
+let overviewRecords=[],overviewError="",overviewLoading=false;
 const periodBounds=()=>{const start=jobYear+(jobPeriod==="month"?"-"+jobMonth:"-01")+"-01";const next=jobPeriod==="year"?(Number(jobYear)+1)+"-01-01":jobMonth==="12"?(Number(jobYear)+1)+"-01-01":jobYear+"-"+String(Number(jobMonth)+1).padStart(2,"0")+"-01";return [start,next];};
 async function loadJobs(next=false){
  const [from,to]=periodBounds();
@@ -17,6 +18,51 @@ async function loadJobs(next=false){
  const batch=shown.map(d=>({id:d.id,...d.data()}));
  jobs=next?jobs.concat(batch):batch;
 }
+async function loadOverview(){
+ overviewLoading=true;overviewError="";
+ try{
+  const [from,to]=periodBounds();
+  const snap=await getDocs(query(collection(db,"jobs"),where("quotationDate",">=",from),where("quotationDate","<",to)));
+  overviewRecords=snap.docs.map(d=>({id:d.id,...d.data()}));
+ }catch(err){overviewError=err.message;overviewRecords=[];}
+ finally{overviewLoading=false;}
+}
+function currentStage(j){
+ const s=j.stages||{};
+ const q=s.quotation||{},po=s.clientPO||{},dt=s.delivery||{},rt=s.return||{},inv=s.invoice||{};
+ if(!q.reference&&!j.reference)return "Quotation";
+ if(!po.reference)return "Client PO";
+ if(!dt.reference)return "Delivery";
+ if(!rt.reference)return "Return";
+ if(!inv.reference)return "Invoice";
+ return "Invoice";
+}
+function jobState(j){
+ const status=String(j.status||"").toLowerCase();
+ if(status==="completed")return "Completed";
+ if(status==="cancelled")return "Cancelled";
+ if(status==="on hold")return "On Hold";
+ return "In Progress";
+}
+function overviewHTML(){
+ const months=["January","February","March","April","May","June","July","August","September","October","November","December"];
+ const total=overviewRecords.length, completed=overviewRecords.filter(j=>jobState(j)==="Completed").length;
+ const cancelled=overviewRecords.filter(j=>jobState(j)==="Cancelled").length,hold=overviewRecords.filter(j=>jobState(j)==="On Hold").length;
+ const active=total-completed-cancelled-hold;
+ const stages=["Quotation","Client PO","Delivery","Return","Invoice"];
+ const counts=stages.map(name=>({name,count:overviewRecords.filter(j=>jobState(j)==="In Progress"&&currentStage(j)===name).length}));
+ return `<div class="j-row"><h3>Job Overview</h3><button id="overviewRefresh">Refresh</button></div>
+ <div class="j-grid j-filter">
+ <label class="j-field">Year<input id="overviewYear" type="number" min="2000" max="2100" value="${jobYear}"></label>
+ <label class="j-field">Period<select id="overviewPeriod"><option value="month" ${jobPeriod==="month"?"selected":""}>Monthly</option><option value="year" ${jobPeriod==="year"?"selected":""}>Full Year</option></select></label>
+ <label class="j-field" id="overviewMonthWrap" ${jobPeriod==="year"?"hidden":""}>Month<select id="overviewMonth">${months.map((m,i)=>`<option value="${String(i+1).padStart(2,"0")}" ${jobMonth===String(i+1).padStart(2,"0")?"selected":""}>${m}</option>`).join("")}</select></label>
+ <div class="j-actions" style="align-items:end"><button id="overviewApply">Apply</button></div></div>
+ <p class="j-note">Jobs grouped by quotation date · ${jobPeriod==="month"?months[Number(jobMonth)-1]+" ":"Full year "}${jobYear}. Totals use all matching Firestore records, not the paginated Jobs list.</p>
+ ${overviewError?`<p role="alert" class="message">Overview failed to load: ${esc(overviewError)}</p>`:""}
+ <div class="j-summary-grid">${[["Total Jobs",total],["In Progress",active],["Completed",completed],["On Hold",hold],["Cancelled",cancelled]].map(([label,n])=>`<div class="j-card"><span class="j-sub">${label}</span><strong class="j-count">${n}</strong></div>`).join("")}</div>
+ ${card(`<h3>Pending by current stage</h3><p class="j-note">A job is counted once at the earliest stage lacking its reference; this is a preliminary workflow indicator.</p>${counts.map(x=>`<div class="j-stage-count"><span>${x.name}</span><strong>${x.count}</strong></div>`).join("")}`)}
+ ${card(`<h3>Pending job references</h3>${overviewRecords.filter(j=>jobState(j)==="In Progress").slice(0,50).map(j=>`<div class="j-stage-count"><span>${esc(j.reference||"No reference")} · ${esc(j.clientName||"")} </span><span>${currentStage(j)}</span></div>`).join("")||'<p class="j-sub">No in-progress jobs for this period.</p>'}${active>50?'<p class="j-note">Showing first 50 references. Open Jobs for the full list.</p>':""}`)}`;
+}
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const manager=()=>role==="manager"||role==="superadmin";
@@ -24,13 +70,14 @@ const field=(key,label,val="",type="text")=>`<label class="j-field">${esc(label)
 const card=(html)=>`<div class="j-card">${html}</div>`;
 const shared=c=>`<div class="j-grid">${field("name","Company name",c.name)}${field("registrationNo","Registration number",c.registrationNo)}</div>`;
 const details=(prefix,c)=>`<div class="j-grid">${field(prefix+"Address","Business address",c.address)}${field(prefix+"Contact","Contact person",c.contactPerson)}${field(prefix+"Phone","Contact number",c.phone)}${field(prefix+"Email","Contact email",c.email,"email")}${prefix==="client"?field("clientRegistrationStatus","Registration status",c.registrationStatus)+field("clientDeadline","Registration deadline",c.deadline,"date")+field("clientRemarks","Remarks",c.remarks):""}</div>`;
-function buttons(){return `<nav class="j-nav">${[["clients","Clients"],["vendors","Vendors"],["jobs","Jobs"]].map(([k,v])=>`<button type="button" data-tab="${k}" class="${tab===k?"selected":""}">${v}</button>`).join("")}</nav><p class="j-note">Global company register · Client and Vendor records remain separate in views and exports.</p>`;}
+function buttons(){return `<nav class="j-nav">${[["overview","Overview"],["jobs","Jobs"],["clients","Clients"],["vendors","Vendors"]].map(([k,v])=>`<button type="button" data-tab="${k}" class="${tab===k?"selected":""}">${v}</button>`).join("")}</nav><p class="j-note">Global company register · Client and Vendor records remain separate in views and exports.</p>`;}
 function viewCompany(c){let p=c[tab==="clients"?"client":"vendor"]||{};return card(`<div class="j-row"><strong>${esc(c.name)}</strong>${manager()?`<button data-edit="${c.id}">Edit</button>`:""}</div><div class="j-sub">${esc(c.registrationNo||"No registration no.")} · ${esc(p.contactPerson||"No contact")} · ${esc(p.phone||"No phone")}</div><div class="j-sub">${esc(p.email||"")} ${p.address?" · "+esc(p.address):""}</div>${tab==="clients"?`<div class="j-sub">Registration: ${esc(p.registrationStatus||"—")} · Deadline: ${esc(p.deadline||"—")}</div>`:""}`);}
 function render(){
  const root=$("jmsModules");if(!root)return;
  const options=companies.filter(c=>c.isClient&&c.status==="active").map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("");
  let content;
- if(tab==="jobs"){
+ if(tab==="overview"){content=overviewHTML();}
+ else if(tab==="jobs"){
   const months=["January","February","March","April","May","June","July","August","September","October","November","December"];
   content=`<div class="j-row"><h3>Jobs</h3><button id="newJob">+ New Job</button></div>
    <div class="j-grid j-filter">
@@ -46,11 +93,16 @@ function render(){
  }
  root.innerHTML=buttons()+content+`<div id="jmsFormRegion"></div><p id="jmsNotice" class="j-note" role="status"></p>`;
  root.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{tab=b.dataset.tab;render();});
+ if(tab==="overview"){
+  $("overviewPeriod").onchange=e=>{$("overviewMonthWrap").hidden=e.target.value==="year";};
+  $("overviewApply").onclick=async()=>{const yr=$("overviewYear").value;if(!/^[0-9]{4}$/.test(yr))return alert("Enter a valid year.");jobYear=yr;jobMonth=$("overviewMonth").value;jobPeriod=$("overviewPeriod").value;await Promise.all([loadOverview(),loadJobs()]);render();};
+  $("overviewRefresh").onclick=async()=>{await loadOverview();render();};
+ }
  if($("newCompany"))$("newCompany").onclick=()=>openCompany();
  if(tab==="jobs"){
    initJobActions(root,{db,user,companies,jobs,reload,render});
    $("filterJobPeriod").onchange=e=>{$("filterMonthHolder").hidden=e.target.value==="year";};
-   $("applyJobFilter").onclick=async()=>{const yr=$("filterJobYear").value;if(!/^[0-9]{4}$/.test(yr))return alert("Choose a four-digit year.");jobYear=yr;jobPeriod=$("filterJobPeriod").value;jobMonth=$("filterJobMonth").value;try{await loadJobs();render();}catch(err){alert("Could not load jobs: "+err.message);}};
+   $("applyJobFilter").onclick=async()=>{const yr=$("filterJobYear").value;if(!/^[0-9]{4}$/.test(yr))return alert("Choose a four-digit year.");jobYear=yr;jobPeriod=$("filterJobPeriod").value;jobMonth=$("filterJobMonth").value;try{await Promise.all([loadJobs(),loadOverview()]);render();}catch(err){alert("Could not load jobs: "+err.message);}};
    $("refreshJobs").onclick=async()=>{try{await loadJobs();render();}catch(err){alert("Refresh failed: "+err.message);}};
    if($("moreJobs"))$("moreJobs").onclick=async()=>{try{await loadJobs(true);render();}catch(err){alert("Unable to load more jobs: "+err.message);}};
  }
@@ -104,7 +156,7 @@ async function reloadCompanies(){
  const snap=await getDocs(collection(db,"companies"));
  companies=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>a.name.localeCompare(b.name));
 }
-async function reload(){await Promise.all([reloadCompanies(),loadJobs()]);}
+async function reload(){await Promise.all([reloadCompanies(),loadJobs(),loadOverview()]);}
 export async function startModules(firestore,currentUser,currentRole){
  db=firestore;user=currentUser;role=currentRole;
  const root=$("jmsModules");root.innerHTML="<p>Loading registers…</p>";
