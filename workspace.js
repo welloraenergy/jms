@@ -1,6 +1,22 @@
 import {jobCards,initJobActions} from "./job-stages.js";
-import {collection,addDoc,updateDoc,doc,getDocs,query,orderBy,serverTimestamp} from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
+import {collection,addDoc,updateDoc,doc,getDocs,query,where,orderBy,limit,startAfter,serverTimestamp} from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
 let db,role,user,companies=[],jobs=[],tab="clients",editing=null;
+const localNow=()=>new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Kuala_Lumpur",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
+const today=localNow();
+let jobYear=today.slice(0,4),jobMonth=today.slice(5,7),jobPeriod="month",jobCursor=null,jobHasMore=false;
+const PAGE_SIZE=30;
+const periodBounds=()=>{const start=jobYear+(jobPeriod==="month"?"-"+jobMonth:"-01")+"-01";const next=jobPeriod==="year"?(Number(jobYear)+1)+"-01-01":jobMonth==="12"?(Number(jobYear)+1)+"-01-01":jobYear+"-"+String(Number(jobMonth)+1).padStart(2,"0")+"-01";return [start,next];};
+async function loadJobs(next=false){
+ const [from,to]=periodBounds();
+ const constraints=[where("quotationDate",">=",from),where("quotationDate","<",to),orderBy("quotationDate","desc"),limit(PAGE_SIZE+1)];
+ if(next&&jobCursor)constraints.splice(3,0,startAfter(jobCursor));
+ const snap=await getDocs(query(collection(db,"jobs"),...constraints));
+ jobHasMore=snap.docs.length>PAGE_SIZE;
+ const shown=snap.docs.slice(0,PAGE_SIZE);
+ jobCursor=shown.length?shown[shown.length-1]:null;
+ const batch=shown.map(d=>({id:d.id,...d.data()}));
+ jobs=next?jobs.concat(batch):batch;
+}
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const manager=()=>role==="manager"||role==="superadmin";
@@ -15,7 +31,14 @@ function render(){
  const options=companies.filter(c=>c.isClient&&c.status==="active").map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("");
  let content;
  if(tab==="jobs"){
-  content=`<div class="j-row"><h3>Jobs</h3><button id="newJob">+ New Job</button></div>`+jobCards(jobs,companies);
+  const months=["January","February","March","April","May","June","July","August","September","October","November","December"];
+  content=`<div class="j-row"><h3>Jobs</h3><button id="newJob">+ New Job</button></div>
+   <div class="j-grid j-filter">
+    <label class="j-field">Year<input id="filterJobYear" type="number" min="2000" max="2100" value="${jobYear}"></label>
+    <label class="j-field">Period<select id="filterJobPeriod"><option value="month" ${jobPeriod==="month"?"selected":""}>Monthly</option><option value="year" ${jobPeriod==="year"?"selected":""}>Full Year</option></select></label>
+    <label class="j-field" id="filterMonthHolder" ${jobPeriod==="year"?"hidden":""}>Month<select id="filterJobMonth">${months.map((m,i)=>`<option value="${String(i+1).padStart(2,"0")}" ${jobMonth===String(i+1).padStart(2,"0")?"selected":""}>${m}</option>`).join("")}</select></label>
+    <div class="j-actions" style="align-items:end"><button type="button" id="applyJobFilter">Apply</button><button type="button" id="refreshJobs">Refresh</button></div>
+   </div><p class="j-note">Showing jobs by quotation date. ${jobPeriod==="month"?months[Number(jobMonth)-1]+" ":"Full year "}${jobYear} · Loaded ${jobs.length}${jobHasMore?"+":""} jobs.</p>`+jobCards(jobs,companies)+`${jobHasMore?'<button type="button" id="moreJobs">Load More</button>':""}`;
  }else{
   let rows=companies.filter(c=>c[tab==="clients"?"isClient":"isVendor"]&&c.status==="active");
   content=`<div class="j-row"><h3>${tab==="clients"?"Client":"Vendor"} Register</h3><div class="j-actions">${manager()?'<button id="newCompany">+ Add Company</button>':""}<button id="exportRegister">Export CSV</button></div></div><input id="companySearch" placeholder="Search companies" aria-label="Search companies">`+
@@ -24,7 +47,13 @@ function render(){
  root.innerHTML=buttons()+content+`<div id="jmsFormRegion"></div><p id="jmsNotice" class="j-note" role="status"></p>`;
  root.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{tab=b.dataset.tab;render();});
  if($("newCompany"))$("newCompany").onclick=()=>openCompany();
- if(tab==="jobs")initJobActions(root,{db,user,companies,jobs,reload,render});
+ if(tab==="jobs"){
+   initJobActions(root,{db,user,companies,jobs,reload,render});
+   $("filterJobPeriod").onchange=e=>{$("filterMonthHolder").hidden=e.target.value==="year";};
+   $("applyJobFilter").onclick=async()=>{const yr=$("filterJobYear").value;if(!/^[0-9]{4}$/.test(yr))return alert("Choose a four-digit year.");jobYear=yr;jobPeriod=$("filterJobPeriod").value;jobMonth=$("filterJobMonth").value;try{await loadJobs();render();}catch(err){alert("Could not load jobs: "+err.message);}};
+   $("refreshJobs").onclick=async()=>{try{await loadJobs();render();}catch(err){alert("Refresh failed: "+err.message);}};
+   if($("moreJobs"))$("moreJobs").onclick=async()=>{try{await loadJobs(true);render();}catch(err){alert("Unable to load more jobs: "+err.message);}};
+ }
  if($("exportRegister"))$("exportRegister").onclick=exportRegister;
  root.querySelectorAll("[data-edit]").forEach(b=>b.onclick=()=>openCompany(companies.find(c=>c.id===b.dataset.edit)));
  if($("companySearch"))$("companySearch").oninput=e=>{
@@ -50,7 +79,7 @@ function openCompany(c={}){
   try{form.querySelector('[type="submit"]').disabled=true;
    if(c.id)await updateDoc(doc(db,"companies",c.id),data);
    else await addDoc(collection(db,"companies"),{...data,createdAt:serverTimestamp(),createdBy:user.uid});
-   await reload();render();$("jmsNotice").textContent="Company saved.";
+   await reloadCompanies();render();$("jmsNotice").textContent="Company saved.";
   }catch(err){alert("Save failed: "+err.message);form.querySelector('[type="submit"]').disabled=false;}
  };
  $("jmsFormRegion").scrollIntoView({behavior:"smooth",block:"nearest"});
@@ -71,11 +100,11 @@ function exportRegister(){
  const csv=[headers,...rows].map(r=>r.map(x=>{let s=String(x??"");if(/^[=+@\-\t\r]/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';}).join(",")).join("\r\n");
  const url=URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"}));const a=document.createElement("a");a.href=url;a.download="jms-"+p+"s.csv";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
-async function reload(){
- const [co,jo]=await Promise.all([getDocs(collection(db,"companies")),getDocs(collection(db,"jobs"))]);
- companies=co.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>a.name.localeCompare(b.name));
- jobs=jo.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>a.reference.localeCompare(b.reference));
+async function reloadCompanies(){
+ const snap=await getDocs(collection(db,"companies"));
+ companies=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>a.name.localeCompare(b.name));
 }
+async function reload(){await Promise.all([reloadCompanies(),loadJobs()]);}
 export async function startModules(firestore,currentUser,currentRole){
  db=firestore;user=currentUser;role=currentRole;
  const root=$("jmsModules");root.innerHTML="<p>Loading registers…</p>";
