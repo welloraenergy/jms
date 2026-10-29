@@ -1,4 +1,4 @@
-import {collection,addDoc,updateDoc,doc,serverTimestamp} from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
+import {collection,addDoc,updateDoc,doc,getDocs,query,where,runTransaction,serverTimestamp} from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
 const stages=[
  {key:"quotation",title:"1. Quotation Stage",fields:[["reference","QUOTATION REFERENCE"],["date","QUOTATION DATE","date"],["client","CLIENT","client"],["description","DESCRIPTION"],["estimatedLoadOut","ESTIMATED LOAD OUT"],["loadOutLocation","LOAD OUT LOCATION"],["minimumRentalDays","MIN. RENTAL DURATION (DAYS)","number"],["paymentTermsDays","PAYMENT TERMS (DAYS)","number"],["rentalItemType","RENTAL ITEM TYPE"],["subRentCompany","SUB-RENT COMPANY"],["subRentQuotation","SUB-RENT QUOTATION REFERENCE AND DATE"],["welloraSubRentPO","WELLORA ENERGY'S PO REFERENCE AND DATE FOR SUB-RENT"],["rentalItemPreparation","RENTAL ITEM PREPARATION"],["quotationStatus","QUOTATION STATUS"],["remarks","REMARKS"]]},
  {key:"clientPO",title:"2. Client Purchase Order",fields:[["reference","CLIENT PO REFERENCE"],["date","CLIENT PO DATE","date"],["loadOut","PO LOAD OUT","date"],["rentalDurationDays","TOTAL RENTAL DURATION (DAYS)","number"],["totalAmount","PO TOTAL AMOUNT","amount"],["currency","PO CURRENCY","currency"],["collectionType","COLLECTION TYPE"],["deliveryPreparation","DELIVERY PREPARATION"],["remarks","REMARKS"]]},
@@ -7,6 +7,8 @@ const stages=[
  {key:"invoice",title:"5. Wellora Invoice",fields:[["reference","INVOICE REFERENCE"],["date","INVOICE DATE","date"],["submissionDue","INVOICE SUBMISSION TO CLIENT DUE","date"],["invoiceStatus","INVOICE STATUS"],["totalAmount","TOTAL INVOICE AMOUNT","amount"],["currency","INVOICE CURRENCY","currency"],["remarks","REMARKS"]]}
 ];
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const normalizeReference=v=>String(v||"").trim().replace(/\s+/g," ").toUpperCase();
+async function uniqueId(reference){const bytes=new TextEncoder().encode(normalizeReference(reference));const hash=await crypto.subtle.digest("SHA-256",bytes);return "ref_"+Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,"0")).join("");}
 const vals=j=>{const r={...j.stages};r.quotation={reference:j.reference||"",date:j.quotationDate||"",client:j.clientId||"",description:j.description||"",...(r.quotation||{})};return r;};
 const companyLabel=(id,companies)=>companies.find(c=>c.id===id)?.name||id||"";
 function control(k,label,type,value,companies){
@@ -23,7 +25,7 @@ function buildForm(j,companies){const stagesData=vals(j||{});let active=stages.f
 function gather(f){const fd=new FormData(f),data={};for(const s of stages){data[s.key]={};for(const [k] of s.fields)data[s.key][k]=String(fd.get(s.key+"__"+k)||"").trim();}return data;}
 function prefixedForm(j,companies){
  const stageData=vals(j||{}),active=stages.find(s=>!filled(s,stageData[s.key]))?.key||"quotation";
- return `<form id="stageJobForm"><p class="j-note">Expand stages and fill in the relevant information. Quotation reference and Client are required.</p>${stages.map(s=>`<details class="j-stage" ${s.key===active?"open":""}><summary>${esc(s.title)} <small>${filled(s,stageData[s.key])?"Recorded":"Not recorded"}</small></summary><div class="j-grid">${s.fields.map(([k,l,t])=>control(s.key+"__"+k,l,t,stageData[s.key]?.[k]??"",companies)).join("")}</div></details>`).join("")}<div class="j-actions"><button type="submit">${j?.id?"Save Job Changes":"Create Job"}</button><button type="button" id="cancelStageForm">Cancel</button></div><p id="stageError" role="alert" class="j-note"></p></form>`;
+ return `<form id="stageJobForm"><p class="j-note">Expand stages and fill in the relevant information. Quotation reference and Client are required.</p>${stages.map(s=>`<details class="j-stage" ${s.key===active?"open":""}><summary>${esc(s.title)} <small>${filled(s,stageData[s.key])?"Recorded":"Not recorded"}</small></summary><div class="j-grid">${s.fields.map(([k,l,t])=>control(s.key+"__"+k,l,t,stageData[s.key]?.[k]??"",companies).replace(s.key==="quotation"&&k==="date"?"type=\\"date\\"":"__no_match__",s.key==="quotation"&&k==="date"?"type=\\"date\\" required":"__no_match__")).join("")}</div></details>`).join("")}<div class="j-actions"><button type="submit">${j?.id?"Save Job Changes":"Create Job"}</button><button type="button" id="cancelStageForm">Cancel</button></div><p id="stageError" role="alert" class="j-note"></p></form>`;
 }
 export function jobCards(jobs,companies){
  return jobs.map(j=>{let v=vals(j);return `<div class="j-card"><div class="j-row"><strong>${esc(v.quotation.reference||j.reference||"Unnamed job")}</strong><span class="j-sub">${esc(j.status||"In progress")}</span></div><p class="j-sub">${esc(companyLabel(v.quotation.client||j.clientId,companies)||j.clientName)} · ${esc(v.quotation.description||j.description||"")}</p><div class="j-actions"><button type="button" data-jobview="${esc(j.id)}">View Details</button><button type="button" data-jobedit="${esc(j.id)}">Edit Stages</button><button type="button" data-jobcsv="${esc(j.id)}">Export CSV</button><button type="button" data-jobpdf="${esc(j.id)}">Print / PDF</button></div></div>`;}).join("")||'<div class="j-card">No jobs yet.</div>';
@@ -40,9 +42,27 @@ export function initJobActions(root,{db,user,companies,jobs,reload,render}){
    e.preventDefault();const form=e.currentTarget,stagesData=gather(form);
    const q=stagesData.quotation,client=companies.find(c=>c.id===q.client&&c.isClient&&c.status==="active");
    if(!q.reference||!client){document.getElementById("stageError").textContent="Enter a quotation reference and select an active client.";return;}
-   const payload={stages:stagesData,reference:q.reference,quotationDate:q.date,description:q.description,clientId:q.client,clientName:client.name,updatedBy:user.uid,updatedAt:serverTimestamp()};
+   if(!q.date){document.getElementById("stageError").textContent="Quotation date is required to file the job under the correct month.";return;}
+   if(j&&normalizeReference(q.reference)!==normalizeReference(j.reference)){
+     document.getElementById("stageError").textContent="Quotation reference cannot be changed after creation. Contact the manager if a reference needs correction.";return;
+   }
+   const payload={stages:stagesData,reference:q.reference,referenceKey:normalizeReference(q.reference),jobPeriod:q.date.slice(0,7),quotationDate:q.date,description:q.description,clientId:q.client,clientName:client.name,updatedBy:user.uid,updatedAt:serverTimestamp()};
    const btn=form.querySelector('[type="submit"]');btn.disabled=true;
-   try{if(j)await updateDoc(doc(db,"jobs",j.id),payload);else await addDoc(collection(db,"jobs"),{...payload,status:"In progress",createdBy:user.uid,createdAt:serverTimestamp()});await reload();render();document.getElementById("jmsNotice").textContent="Job saved.";}
+   try{
+     if(j)await updateDoc(doc(db,"jobs",j.id),payload);
+     else {
+       const stableId=await uniqueId(q.reference);
+       const legacy=await getDocs(query(collection(db,"jobs"),where("reference","==",q.reference)));
+       if(!legacy.empty)throw new Error("A job with this quotation reference already exists. Open and edit the existing job.");
+       const target=doc(db,"jobs",stableId);
+       await runTransaction(db,async tx=>{
+         const existing=await tx.get(target);
+         if(existing.exists())throw new Error("A job with this quotation reference already exists. Open and edit the existing job.");
+         tx.set(target,{...payload,status:"In progress",createdBy:user.uid,createdAt:serverTimestamp()});
+       });
+     }
+     await reload();render();document.getElementById("jmsNotice").textContent="Job saved.";
+   }
    catch(err){document.getElementById("stageError").textContent="Save failed: "+err.message;btn.disabled=false;}
   };region().scrollIntoView({block:"nearest",behavior:"smooth"});
  }
